@@ -1,0 +1,176 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+    function validStatus(status) {
+      return status in ['reported', 'reviewing', 'in_progress', 'resolved', 'rejected'];
+    }
+    function validMunicipality(municipality) {
+      return municipality in [
+        'Deçan', 'Dragash', 'Ferizaj', 'Fushë Kosovë', 'Gjakovë', 'Gjilan',
+        'Gllogoc', 'Graçanicë', 'Hani i Elezit', 'Istog', 'Junik', 'Kaçanik',
+        'Kamenicë', 'Klinë', 'Klokot', 'Leposaviq', 'Lipjan', 'Malishevë',
+        'Mamushë', 'Mitrovicë e Jugut', 'Mitrovicë e Veriut', 'Novobërdë',
+        'Obiliq', 'Partesh', 'Pejë', 'Podujevë', 'Prishtinë', 'Prizren',
+        'Rahovec', 'Ranillug', 'Shtërpcë', 'Shtime', 'Skenderaj', 'Suharekë',
+        'Viti', 'Vushtrri', 'Zubin Potok', 'Zveçan', 'Ratkoc', 'Radoste', 'Xerxe'    
+      ];
+    }
+    function validCategory(category) {
+      return category in [
+        'Rrugë të dëmtuara', 'Mbeturina', 'Ndriçim publik', 'Ujë dhe kanalizim',
+        'Hapësira publike', 'Siguri rrugore', 'Ndërtesa publike', 'Tjetër'
+      ];
+    }
+    function validCoordinatePair(data) {
+      return (data.latitude == null && data.longitude == null)
+        || (data.latitude is number && data.longitude is number
+          && data.latitude >= 41.8 && data.latitude <= 43.3
+          && data.longitude >= 19.5 && data.longitude <= 21.9);
+    }
+    function validReport(data) {
+      return data.keys().hasAll([
+          'title', 'description', 'category', 'municipality', 'address',
+          'latitude', 'longitude', 'imageUrls', 'authorUid', 'status',
+          'confirmationCount', 'createdAt', 'updatedAt', 'lastStatusHistoryId'
+        ])
+        && data.keys().hasOnly([
+          'title', 'description', 'category', 'municipality', 'address',
+          'latitude', 'longitude', 'imageUrls', 'authorUid', 'status',
+          'confirmationCount', 'createdAt', 'updatedAt', 'lastStatusHistoryId'
+        ])
+        && data.title is string && data.title.size() >= 4 && data.title.size() <= 100
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 1500
+        && validCategory(data.category) && validMunicipality(data.municipality)
+        && data.address is string && data.address.size() <= 180
+        && validCoordinatePair(data)
+        && data.imageUrls is list && data.imageUrls.size() <= 1
+        && (data.imageUrls.size() == 0 || data.imageUrls[0] is string)
+        && data.authorUid is string
+        && validStatus(data.status)
+        && data.confirmationCount is int
+        && data.lastStatusHistoryId is string
+        && data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly([
+          'displayName', 'email', 'createdAt', 'photoURL', 'preferredMunicipality'
+        ])
+        && request.resource.data.keys().hasAll(['displayName', 'email', 'createdAt', 'photoURL', 'preferredMunicipality'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 80
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.photoURL is string
+        && request.resource.data.preferredMunicipality is string
+        && (request.resource.data.preferredMunicipality == ''
+          || validMunicipality(request.resource.data.preferredMunicipality));
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['displayName', 'preferredMunicipality'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 80
+        && request.resource.data.preferredMunicipality is string
+        && (request.resource.data.preferredMunicipality == ''
+          || validMunicipality(request.resource.data.preferredMunicipality));
+      allow delete: if false;
+    }
+
+    match /reports/{reportId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && validReport(request.resource.data)
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.status == 'reported'
+        && request.resource.data.confirmationCount == 0
+        && request.resource.data.lastStatusHistoryId == 'initial'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'updatedAt', 'lastStatusHistoryId'])
+        && validStatus(request.resource.data.status)
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastStatusHistoryId is string
+        && existsAfter(/databases/$(database)/documents/reports/$(reportId)/statusHistory/$(request.resource.data.lastStatusHistoryId))
+        && getAfter(/databases/$(database)/documents/reports/$(reportId)/statusHistory/$(request.resource.data.lastStatusHistoryId)).data.newStatus == request.resource.data.status
+        && getAfter(/databases/$(database)/documents/reports/$(reportId)/statusHistory/$(request.resource.data.lastStatusHistoryId)).data.changedBy == request.auth.uid
+        && getAfter(/databases/$(database)/documents/reports/$(reportId)/statusHistory/$(request.resource.data.lastStatusHistoryId)).data.createdAt == request.time
+        || signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['confirmationCount', 'updatedAt'])
+        && request.resource.data.confirmationCount == resource.data.confirmationCount + 1
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/reports/$(reportId)/confirmations/$(request.auth.uid));
+      allow delete: if isAdmin();
+
+      match /confirmations/{uid} {
+        allow read: if signedIn() && request.auth.uid == uid;
+        allow create: if signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['userUid', 'createdAt'])
+          && request.resource.data.userUid == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && exists(/databases/$(database)/documents/reports/$(reportId));
+        allow update, delete: if false;
+      }
+
+      match /statusHistory/{historyId} {
+        allow read: if true;
+        allow create: if isAdmin()
+          && request.resource.data.keys().hasOnly([
+            'previousStatus', 'newStatus', 'changedBy', 'note', 'createdAt'
+          ])
+          && request.resource.data.keys().hasAll([
+            'previousStatus', 'newStatus', 'changedBy', 'note', 'createdAt'
+          ])
+          && request.resource.data.newStatus is string
+          && validStatus(request.resource.data.newStatus)
+          && (request.resource.data.previousStatus == null || validStatus(request.resource.data.previousStatus))
+          && request.resource.data.changedBy == request.auth.uid
+          && request.resource.data.note is string
+          && request.resource.data.note.size() <= 500
+          && request.resource.data.createdAt == request.time
+          && get(/databases/$(database)/documents/reports/$(reportId)).data.status
+            == request.resource.data.previousStatus
+          && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.status
+            == request.resource.data.newStatus
+          && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.lastStatusHistoryId
+            == historyId
+          || signedIn()
+          && historyId == 'initial'
+          && request.resource.data.keys().hasOnly([
+            'previousStatus', 'newStatus', 'changedBy', 'note', 'createdAt'
+          ])
+          && request.resource.data.keys().hasAll([
+            'previousStatus', 'newStatus', 'changedBy', 'note', 'createdAt'
+          ])
+          && request.resource.data.previousStatus == null
+          && request.resource.data.newStatus == 'reported'
+          && request.resource.data.changedBy == request.auth.uid
+          && request.resource.data.note == 'Raportimi u pranua.'
+          && request.resource.data.createdAt == request.time
+          && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.authorUid
+            == request.auth.uid
+          && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.status == 'reported'
+          && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.lastStatusHistoryId
+            == historyId;
+        allow update, delete: if false;
+      }
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+  }
+}
